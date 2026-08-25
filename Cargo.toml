@@ -1,0 +1,18 @@
+[package]
+name = "ocs-mcp-bridge"
+version = "0.4.0"
+edition = "2021"
+description = "Open CAD Studio plugin that serves the live selection and accepts draw/remove requests over a local socket, so MCP servers and other tools can read and write the open drawing."
+license = "GPL-3.0-only"
+repository = "https://github.com/piyton/ocs-mcp-bridge"
+
+[lib]
+crate-type = ["cdylib"]
+
+# Pin to the release tag the installed host was built from, and to the same
+# acadrust revision (Cargo.lock at that tag), so the loaded library is
+# binary-compatible with the host.
+[dependencies]
+ocs_plugin_api = { git = "https://github.com/HakanSeven12/OpenCADStudio", tag = "v0.9.7", features = ["host"] }
+acadrust = { git = "https://github.com/HakanSeven12/cadcodec.git", rev = "0908da7", features = ["serde"] }
+serde_json = "1"

@@ -1,0 +1,39 @@
+# Build the plugin for every platform and attach the assets the Open CAD
+# Studio Plugin Manager expects (windows-x86_64.dll etc. + plugin.toml) to the
+# release for the pushed tag.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            lib: ocs_mcp_bridge.dll
+            asset: windows-x86_64.dll
+          - os: ubuntu-latest
+            lib: libocs_mcp_bridge.so
+            asset: linux-x86_64.so
+          - os: macos-latest
+            lib: libocs_mcp_bridge.dylib
+            asset: macos-aarch64.dylib
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - name: Rename to the Plugin Manager asset name
+        shell: bash
+        run: cp "target/release/${{ matrix.lib }}" "${{ matrix.asset }}"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ matrix.asset }}
+            plugin.toml

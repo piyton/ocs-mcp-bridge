@@ -19,9 +19,11 @@ manual link, or install from a release: put `plugin.toml` and the platform
 library side by side in
 `<config>/OpenCADStudio/plugins/ocs.mcp_bridge/` and restart.
 
-After starting, click **Connect** once in the *MCP Bridge* ribbon tab. That
-caches the host's thread-safe request channel; everything afterwards is
-click-free.
+The bridge connects itself: the host routes every command through every
+plugin, so the first command you run in the session - any command - hands the
+plugin its write channel. The ribbon tab has **Status**, which prints the
+address, connection state, selection size and event count to the command line,
+and **Connect** as an explicit fallback.
 
 ## Protocol
 

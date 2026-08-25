@@ -25,8 +25,10 @@
 //!   {"type":"lwpolyline","vertices":[[x,y,bulge],...],"closed":bool}
 //!
 //! The sender (thread-safe write channel to the host) is cached on the first
-//! dispatch: click Connect once per session, everything after that is
-//! click-free. Live selection tracking additionally requires the host to emit
+//! dispatch of *any* command - the host routes every command through every
+//! plugin - so the bridge connects itself as soon as the user does anything.
+//! The Connect button is only a fallback. Live selection tracking
+//! additionally requires the host to emit
 //! `SelectionChanged`, which stock 0.9.7 does not do yet - see
 //! <https://github.com/HakanSeven12/OpenCADStudio/issues/879>. Writing and
 //! snapshot reads work on stock builds.
@@ -47,7 +49,7 @@ use serde_json::{json, Value};
 static MANIFEST: PluginManifest = PluginManifest {
     id: "ocs.mcp_bridge",
     name: "MCP Bridge",
-    version: "0.4.0",
+    version: "0.5.0",
     description: "Read/write bridge for MCP servers and external tools.",
     api_version: ApiVersion::CURRENT,
     ribbon_order: 60,
@@ -128,6 +130,18 @@ fn entity_json(e: &EntityType) -> Option<Value> {
             "insert_point": [i.insert_point.x, i.insert_point.y],
             "rotation": i.rotation,
         }),
+        EntityType::Text(t) => json!({
+            "type": "text", "handle": t.common.handle.value(),
+            "layer": t.common.layer, "value": t.value,
+            "position": [t.insertion_point.x, t.insertion_point.y],
+            "height": t.height,
+        }),
+        EntityType::MText(t) => json!({
+            "type": "mtext", "handle": t.common.handle.value(),
+            "layer": t.common.layer, "value": t.value,
+            "position": [t.insertion_point.x, t.insertion_point.y],
+            "height": t.height,
+        }),
         _ => return None,
     };
     Some(v)
@@ -204,6 +218,28 @@ fn entity_from_json(v: &Value) -> Result<EntityType, String> {
 // ---------------------------------------------------------------------------
 // requests through the sender (click-free, from the socket thread)
 // ---------------------------------------------------------------------------
+
+/// Cache the host's thread-safe write channel, once.
+///
+/// `HostApi` is only handed to us during a dispatch, and only the host starts
+/// dispatches - a plugin cannot call itself. But the host routes *every*
+/// command through every loaded plugin (see `try_dispatch`), so the first
+/// command the user runs - ours or not - is enough to connect. That makes the
+/// Connect button a fallback rather than a requirement.
+fn cache_sender(host: &mut dyn HostApi) -> bool {
+    if let Ok(g) = SENDER.lock() {
+        if g.is_some() {
+            return true;
+        }
+    }
+    if let Some(s) = host.plugin_request_sender() {
+        if let Ok(mut g) = SENDER.lock() {
+            *g = Some(s);
+            return true;
+        }
+    }
+    false
+}
 
 fn send_req(req: PluginRequest) -> Result<PluginResponse, String> {
     let guard = SENDER.lock().map_err(|_| "sender lock poisoned".to_string())?;
@@ -447,12 +483,22 @@ impl CadModule for BridgeModule {
         self.groups.get_or_init(|| {
             vec![RibbonGroup {
                 title: "Bridge",
-                tools: vec![RibbonItem::LargeTool(ToolDef {
-                    id: "MCP_CONNECT",
-                    label: "Connect",
-                    icon: IconKind::Glyph("#"),
-                    event: ModuleEvent::Command("MCP_CONNECT".to_string()),
-                })],
+                tools: vec![
+                    // Status first: it is the button you want when something
+                    // looks wrong, and it prints the address to connect to.
+                    RibbonItem::LargeTool(ToolDef {
+                        id: "MCP_STATUS",
+                        label: "Status",
+                        icon: IconKind::Glyph("i"),
+                        event: ModuleEvent::Command("MCP_STATUS".to_string()),
+                    }),
+                    RibbonItem::LargeTool(ToolDef {
+                        id: "MCP_CONNECT",
+                        label: "Connect",
+                        icon: IconKind::Glyph("#"),
+                        event: ModuleEvent::Command("MCP_CONNECT".to_string()),
+                    }),
+                ],
             }]
         })
     }
@@ -472,7 +518,42 @@ impl BuiltinPlugin for BridgePlugin {
     }
 
     fn dispatch(&self, host: &mut dyn HostApi, cmd: &str) -> bool {
+        // Every command the user runs passes through here, ours or not, so the
+        // first one connects the bridge without anyone clicking anything.
+        cache_sender(host);
+
         match cmd {
+            "MCP_STATUS" => {
+                start_server();
+                let port = std::env::var("OCS_BRIDGE_PORT")
+                    .ok()
+                    .and_then(|p| p.parse::<u16>().ok())
+                    .unwrap_or(48810);
+                let connected = SENDER.lock().map(|g| g.is_some()).unwrap_or(false);
+                let selected = LAST_SELECTION.lock().map(|g| g.len()).unwrap_or(0);
+                let notif = NOTIF_SELECTION.load(Ordering::Relaxed);
+
+                host.push_info(&format!("MCP Bridge {}", MANIFEST.version));
+                host.push_info(&format!("  address    127.0.0.1:{port}"));
+                host.push_info(&format!(
+                    "  channel    {}",
+                    if connected {
+                        "connected - reading and writing work"
+                    } else {
+                        "not connected - run any command to connect"
+                    }
+                ));
+                host.push_info(&format!("  selection  {selected} entities"));
+                host.push_info(&format!(
+                    "  events     {notif} selection notifications{}",
+                    if notif == 0 {
+                        "  (needs host patch, see OpenCADStudio#879)"
+                    } else {
+                        ""
+                    }
+                ));
+                true
+            }
             "MCP_CONNECT" => {
                 start_server();
                 // The sender is the thread-safe write channel; once cached,

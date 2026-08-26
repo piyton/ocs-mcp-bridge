@@ -14,6 +14,10 @@ never requires recompiling the plugin or restarting Open CAD Studio.
 
 ## Install
 
+New here? Start with **[GETTING-STARTED.md](GETTING-STARTED.md)** - install,
+first run, protocol and troubleshooting in one place.
+
+
 Via the Plugin Manager: add the repository `piyton/ocs-mcp-bridge` as a
 manual link, or install from a release: put `plugin.toml` and the platform
 library side by side in

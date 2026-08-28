@@ -34,7 +34,7 @@
 //! snapshot reads work on stock builds.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use acadrust::entities::{Arc as CadArc, Circle, EntityType, Line, LwPolyline, LwVertex};
 use acadrust::types::{Vector2, Vector3};
@@ -49,7 +49,7 @@ use serde_json::{json, Value};
 static MANIFEST: PluginManifest = PluginManifest {
     id: "ocs.mcp_bridge",
     name: "MCP Bridge",
-    version: "0.5.0",
+    version: "0.6.0",
     description: "Read/write bridge for MCP servers and external tools.",
     api_version: ApiVersion::CURRENT,
     ribbon_order: 60,
@@ -57,12 +57,21 @@ static MANIFEST: PluginManifest = PluginManifest {
     command_prefixes: &["MCP_"],
 };
 
-/// Handles from the most recent `SelectionChanged`.
+/// Handles from the most recent selection notification.
 static LAST_SELECTION: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+/// Tab the selection belongs to. `None` on hosts that send the tab-less
+/// notification, which is why clients must treat it as optional.
+static SELECTION_TAB: Mutex<Option<u64>> = Mutex::new(None);
 /// Geometry captured via the Connect button (fallback without a sender).
 static SELECTION_JSON: Mutex<Option<String>> = Mutex::new(None);
 /// Thread-safe write channel to the host, cached on the first dispatch.
-static SENDER: Mutex<Option<Box<dyn PluginRequestSender>>> = Mutex::new(None);
+///
+/// Held as an `Arc` so a caller can clone it out and release the lock before
+/// blocking on the host. Holding the lock across the request would let one
+/// slow or unanswered call wedge every other request, `status` included -
+/// which is exactly what happens on a headless host, where nothing services
+/// plugin requests at all.
+static SENDER: Mutex<Option<Arc<dyn PluginRequestSender>>> = Mutex::new(None);
 
 static NOTIF_TOTAL: AtomicUsize = AtomicUsize::new(0);
 static NOTIF_SELECTION: AtomicUsize = AtomicUsize::new(0);
@@ -234,7 +243,7 @@ fn cache_sender(host: &mut dyn HostApi) -> bool {
     }
     if let Some(s) = host.plugin_request_sender() {
         if let Ok(mut g) = SENDER.lock() {
-            *g = Some(s);
+            *g = Some(Arc::from(s));
             return true;
         }
     }
@@ -242,11 +251,15 @@ fn cache_sender(host: &mut dyn HostApi) -> bool {
 }
 
 fn send_req(req: PluginRequest) -> Result<PluginResponse, String> {
-    let guard = SENDER.lock().map_err(|_| "sender lock poisoned".to_string())?;
-    let s = guard.as_ref().ok_or(
-        "not connected yet: click Connect once in the MCP Bridge ribbon tab",
-    )?;
-    s.request(req).map_err(|e| format!("{e:?}"))
+    let sender = {
+        let guard = SENDER.lock().map_err(|_| "sender lock poisoned".to_string())?;
+        guard
+            .as_ref()
+            .ok_or("not connected yet: run any command, or click Connect in the MCP Bridge tab")?
+            .clone()
+    };
+    // Lock released: a blocked host call no longer blocks the whole bridge.
+    sender.request(req).map_err(|e| format!("{e:?}"))
 }
 
 /// Selection + geometry, click-free through a document snapshot.
@@ -272,6 +285,7 @@ fn live_selection() -> Value {
             json!({
                 "ok": true, "source": "snapshot (click-free)",
                 "selected": handles.len(), "delivered": entities.len(),
+                "tab_id": SELECTION_TAB.lock().ok().and_then(|g| *g),
                 "skipped_by_type": skipped,
                 "unit": "drawing units", "angles": "radians",
                 "notifications_selection": notif,
@@ -394,8 +408,13 @@ fn handle_request(line: &str) -> Value {
             "ok": true, "version": MANIFEST.version,
             "connected": SENDER.lock().map(|g| g.is_some()).unwrap_or(false),
             "selected": LAST_SELECTION.lock().map(|g| g.len()).unwrap_or(0),
+            "tab_id": SELECTION_TAB.lock().ok().and_then(|g| *g),
             "notifications_total": NOTIF_TOTAL.load(Ordering::Relaxed),
             "notifications_selection": NOTIF_SELECTION.load(Ordering::Relaxed),
+            // Host and plugin must be built by the same rustc: Rust has no
+            // stable ABI and compound types cross the dll boundary. Compare
+            // this against the `rustc/<hash>` string inside the host binary.
+            "rustc": env!("BRIDGE_RUSTC"),
         }),
         "selection" => live_selection(),
         "add" => live_add(&req),
@@ -534,6 +553,7 @@ impl BuiltinPlugin for BridgePlugin {
                 let notif = NOTIF_SELECTION.load(Ordering::Relaxed);
 
                 host.push_info(&format!("MCP Bridge {}", MANIFEST.version));
+                host.push_info(&format!("  built by   rustc {}", env!("BRIDGE_RUSTC")));
                 host.push_info(&format!("  address    127.0.0.1:{port}"));
                 host.push_info(&format!(
                     "  channel    {}",
@@ -556,16 +576,8 @@ impl BuiltinPlugin for BridgePlugin {
             }
             "MCP_CONNECT" => {
                 start_server();
-                // The sender is the thread-safe write channel; once cached,
-                // the socket thread can read and write click-free.
-                let had = SENDER.lock().map(|g| g.is_some()).unwrap_or(false);
-                if !had {
-                    if let Some(s) = host.plugin_request_sender() {
-                        if let Ok(mut g) = SENDER.lock() {
-                            *g = Some(s);
-                        }
-                    }
-                }
+                // `cache_sender` already ran at the top of dispatch, for this
+                // and for every other command; this button only reports it.
                 let connected = SENDER.lock().map(|g| g.is_some()).unwrap_or(false);
 
                 // Fallback cache in case no sender is available.
@@ -610,10 +622,27 @@ impl BuiltinPlugin for BridgePlugin {
     // when future host versions add variants.
     fn on_notification(&mut self, _command_id: Option<u64>, notification: HostNotification) {
         NOTIF_TOTAL.fetch_add(1, Ordering::Relaxed);
-        if let HostNotification::SelectionChanged { handles } = notification {
+
+        // Two shapes of the same event. 0.9.8 and later emit only
+        // `SelectionChangedV4`, which carries the tab the selection belongs to;
+        // the tab-less `SelectionChanged` is kept for hosts that predate it.
+        // `HostNotification` is #[non_exhaustive], so the catch-all arm is
+        // required and also keeps this compiling against future variants.
+        let selection = match notification {
+            HostNotification::SelectionChangedV4 { tab_id, handles } => {
+                Some((Some(tab_id), handles))
+            }
+            HostNotification::SelectionChanged { handles } => Some((None, handles)),
+            _ => None,
+        };
+
+        if let Some((tab_id, handles)) = selection {
             NOTIF_SELECTION.fetch_add(1, Ordering::Relaxed);
             if let Ok(mut g) = LAST_SELECTION.lock() {
                 *g = handles.iter().map(|h| h.value()).collect();
+            }
+            if let Ok(mut g) = SELECTION_TAB.lock() {
+                *g = tab_id;
             }
             // Any captured geometry belongs to the previous selection.
             if let Ok(mut g) = SELECTION_JSON.lock() {

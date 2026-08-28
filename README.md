@@ -61,14 +61,37 @@ and `insert` (block name, insert point, rotation); legacy `Polyline`/
 
 ## Compatibility
 
-Built against the `v0.9.7` tag with the matching `acadrust` revision; the
-host's version gate refuses an incompatible dll instead of crashing.
+**Build the plugin with the same rustc the host was built with.** Rust has no
+stable ABI, and this plugin passes `EntityType` and `CadDocument` across the
+dynamic-library boundary. A mismatch does not fail cleanly: the plugin loads,
+`status` and `info` work, and then the runner process dies the moment anything
+compound crosses - which looks like a host bug and is not one.
 
-**Live selection tracking requires the host to emit
-`HostNotification::SelectionChanged`, which stock 0.9.7 does not do yet** —
-see [OpenCADStudio#879](https://github.com/HakanSeven12/OpenCADStudio/issues/879)
-for the one-commit host patch. Writing, snapshot reads, and the Connect-button
-capture use only APIs present in stock 0.9.7.
+Diagnose it in one line. `{"op":"status"}` reports the compiler that built the
+plugin; compare it with the host:
+
+```
+{"op":"status"}  ->  "rustc": "1.98.0 (88d9e12ae…)"
+strings "…/OpenCADStudio.exe" | grep -o 'rustc/[0-9a-f]\{40\}'
+```
+
+Upstream CI builds releases with `dtolnay/rust-toolchain@stable`, so the
+required toolchain moves with each Rust release, roughly every six weeks.
+`rustup update stable` before rebuilding is usually all it takes.
+
+
+Built against the `v0.9.8` tag, mirroring the workspace `[patch]` so
+`acadrust` resolves to the same revision the host uses. The host's version gate
+checks the API major and the `acadrust` source, but **not** the compiler - see
+the toolchain note above.
+
+Live selection tracking needs `SelectionChangedV4`, which the host emits from
+**v0.9.8** onwards ([#879](https://github.com/HakanSeven12/OpenCADStudio/issues/879),
+implemented in [#881](https://github.com/HakanSeven12/OpenCADStudio/pull/881)).
+That notification carries a `tab_id`, which the bridge passes through so a
+client can tell which drawing a selection belongs to. On older hosts the
+tab-less `SelectionChanged` is still accepted, so selections keep working
+wherever the host emits either form.
 
 ## Security
 

@@ -16,26 +16,17 @@ and answering questions over a local socket.
 Read this table before you install; one feature depends on a host change that
 has not shipped yet.
 
-| | Official release (v0.9.7) | Build with the selection patch |
-|---|---|---|
-| Draw into the open drawing | yes | yes |
-| Delete entities | yes | yes |
-| Print messages on the command line | yes | yes |
-| **See what the user selected** | **no** | yes |
+Everything works on the official **v0.9.8** release: reading the selection,
+drawing, deleting, and printing messages. Selection tracking landed in v0.9.8
+([#879](https://github.com/HakanSeven12/OpenCADStudio/issues/879) →
+[#881](https://github.com/HakanSeven12/OpenCADStudio/pull/881)), and the
+notification carries a `tab_id` so you can tell which drawing a selection
+belongs to. On v0.9.7 and older the selection stays empty; the write side still
+works.
 
-Open CAD Studio does not yet tell plugins when the selection changes, so on a
-stock build `{"op":"selection"}` always comes back empty. Two issues track this:
-
-* [#879](https://github.com/HakanSeven12/OpenCADStudio/issues/879) — the report,
-  with a minimal patch
-* [#881](https://github.com/HakanSeven12/OpenCADStudio/pull/881) — the
-  maintainers' own, broader implementation (`SelectionChangedV4`, carrying a
-  tab id). Open at the time of writing.
-
-Once #881 is merged and released, selection tracking works on the official
-build — but note the variant is named `SelectionChangedV4`, not
-`SelectionChanged`, so **this plugin will need a matching update**. Watch the
-releases here rather than assuming it starts working by itself.
+**One condition matters more than the version:** the plugin has to be built by
+the same rustc as the host. See [Toolchain](#toolchain) — get that wrong and it
+fails in a way that looks like a bug in Open CAD Studio.
 
 ---
 
@@ -195,13 +186,39 @@ Any language works — it is a socket and a line of JSON.
 
 ---
 
+## Toolchain
+
+**Build the plugin with the same rustc that built the host.** Rust has no
+stable ABI, and the plugin passes `EntityType` and `CadDocument` across the
+dynamic-library boundary. A mismatch does not fail cleanly: the plugin loads,
+`status` and `info` answer normally, and then the plugin process dies the
+instant anything compound crosses — reading a selection, drawing a line. It
+looks like a host bug. It is not.
+
+`{"op":"status"}` reports the compiler that built the plugin. Compare it with
+the host binary:
+
+```
+{"op":"status"}   ->   "rustc": "1.98.0 (88d9e12ae…)"
+strings "C:/Program Files/Open CAD Studio/OpenCADStudio.exe" | grep -o 'rustc/[0-9a-f]*'
+```
+
+Same hash and you are fine. Different: `rustup update stable`, then rebuild.
+Upstream builds its releases with whatever Rust stable is current, so the
+required toolchain moves roughly every six weeks.
+
+The plugin is built against the `v0.9.8` tag, mirroring the workspace `[patch]`
+so `acadrust` resolves to the revision the host uses. The host's gate checks the
+API major and the `acadrust` source — but not the compiler.
+
 ## Troubleshooting
 
 | What you see | What it means |
 |---|---|
 | Connection refused | Open CAD Studio is not running, or the plugin is not installed. Check for the MCP Bridge ribbon tab. |
 | `not connected yet: click Connect once…` | The plugin has not been handed the write channel. Run any command, or click **Connect**. |
-| `selection` returns 0 entities, `events` is 0 | Your build does not emit selection changes; see the table at the top. |
+| `selection` returns 0 entities, `events` is 0 | Host older than v0.9.8, which is where selection notifications arrived. |
+| Bridge disappears on `selection` or `add`, while `status` works | rustc mismatch — see [Toolchain](#toolchain). |
 | `unknown entity type "…"` on a write | Only line, arc, circle and lwpolyline can be written. |
 | Bind failure on startup | Another instance already holds the port. Check `%TEMP%/ocs_mcp_bridge_socket_error.txt`, or set `OCS_BRIDGE_PORT`. |
 

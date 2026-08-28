@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "acadrust"
 version = "0.4.1"
-source = "git+https://github.com/HakanSeven12/cadcodec.git?rev=0908da7#0908da7b6e4f702a6c78359a57f53e2b79cf39eb"
+source = "git+https://git@github.com/HakanSeven12/cadcodec.git?rev=788eea0161ba9f3eb7ee6569fd8bb52a8207a2ed#788eea0161ba9f3eb7ee6569fd8bb52a8207a2ed"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -529,7 +529,7 @@ dependencies = [
 
 [[package]]
 name = "ocs-mcp-bridge"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "acadrust",
  "ocs_plugin_api",
@@ -539,7 +539,7 @@ dependencies = [
 [[package]]
 name = "ocs_plugin_api"
 version = "0.2.0"
-source = "git+https://github.com/HakanSeven12/OpenCADStudio?tag=v0.9.7#6317de2caa596bd2a8e898dab9019ba2667b0611"
+source = "git+https://github.com/HakanSeven12/OpenCADStudio?tag=v0.9.8#1516694c72ae94ef7cf03750d4fbb070a8c81ab3"
 dependencies = [
  "acadrust",
  "bincode",
@@ -986,9 +986,9 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "uuid"
-version = "1.25.0"
+version = "1.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f053576934f05a761a402421fbbe3d425d9366f75f978806a037b3ca481abecc"
+checksum = "b5772d71c9be8a8a6ac2117d949c5b224c1b72241bb611d9a3012edcf8af7812"
 dependencies = [
  "js-sys",
  "wasm-bindgen",

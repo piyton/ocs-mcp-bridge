@@ -1,6 +1,6 @@
 [package]
 name = "ocs-mcp-bridge"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "Open CAD Studio plugin that serves the live selection and accepts draw/remove requests over a local socket, so MCP servers and other tools can read and write the open drawing."
 license = "GPL-3.0-only"
@@ -9,10 +9,16 @@ repository = "https://github.com/piyton/ocs-mcp-bridge"
 [lib]
 crate-type = ["cdylib"]
 
-# Pin to the release tag the installed host was built from, and to the same
-# acadrust revision (Cargo.lock at that tag), so the loaded library is
-# binary-compatible with the host.
+# Pin to the release tag the installed host was built from, so the loaded
+# library is binary-compatible with it.
 [dependencies]
-ocs_plugin_api = { git = "https://github.com/HakanSeven12/OpenCADStudio", tag = "v0.9.7", features = ["host"] }
-acadrust = { git = "https://github.com/HakanSeven12/cadcodec.git", rev = "0908da7", features = ["serde"] }
+ocs_plugin_api = { git = "https://github.com/HakanSeven12/OpenCADStudio", tag = "v0.9.8", features = ["host"] }
+acadrust = { git = "https://github.com/HakanSeven12/cadcodec.git", rev = "788eea0161ba9f3eb7ee6569fd8bb52a8207a2ed", features = ["serde"] }
 serde_json = "1"
+
+# `ocs_plugin_api` asks for acadrust rev 5b2ae66 while the host workspace pins
+# 788eea0, and the host reconciles that with exactly this patch. Mirror it or
+# cargo builds both revisions, and the two sets of `EntityType` / `Handle`
+# types do not interchange - which is a wall of E0308 mismatches.
+[patch."https://github.com/HakanSeven12/cadcodec.git"]
+acadrust = { git = "https://git@github.com/HakanSeven12/cadcodec.git", rev = "788eea0161ba9f3eb7ee6569fd8bb52a8207a2ed" }

@@ -529,7 +529,7 @@ dependencies = [
 
 [[package]]
 name = "ocs-mcp-bridge"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "acadrust",
  "ocs_plugin_api",

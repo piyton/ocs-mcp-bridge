@@ -1,6 +1,6 @@
 [package]
 name = "ocs-mcp-bridge"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 description = "Open CAD Studio plugin that serves the live selection and accepts draw/remove requests over a local socket, so MCP servers and other tools can read and write the open drawing."
 license = "GPL-3.0-only"

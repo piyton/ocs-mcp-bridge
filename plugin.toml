@@ -1,7 +1,7 @@
 [plugin]
 id = "ocs.mcp_bridge"
 name = "MCP Bridge"
-version = "0.6.0"
+version = "0.7.0"
 description = "Serves the live selection and accepts draw/remove requests over a local socket, so MCP servers and other tools can read and write the open drawing."
 author = "piyton"
 license = "GPL-3.0-only"

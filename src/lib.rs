@@ -10,8 +10,10 @@
 //! multiple requests per connection:
 //!
 //!   {"op":"status"}                      -> connected? selection count
-//!   {"op":"selection"}                   -> handles + geometry (click-free
-//!                                           once the sender is available)
+//!   {"op":"selection"}                   -> handles + geometry, block
+//!                                           references expanded to world
+//!                                           space, plus the document's
+//!                                           `insertion_units`
 //!   {"op":"add","entities":[...],
 //!    "undo_label":"..."}                 -> draws into the open drawing
 //!   {"op":"remove","handles":[...],
@@ -27,11 +29,14 @@
 //! The sender (thread-safe write channel to the host) is cached on the first
 //! dispatch of *any* command - the host routes every command through every
 //! plugin - so the bridge connects itself as soon as the user does anything.
-//! The Connect button is only a fallback. Live selection tracking
-//! additionally requires the host to emit
-//! `SelectionChanged`, which stock 0.9.7 does not do yet - see
-//! <https://github.com/HakanSeven12/OpenCADStudio/issues/879>. Writing and
-//! snapshot reads work on stock builds.
+//! The Connect button is only a fallback. Live selection tracking needs the
+//! host to emit a selection notification, which it does from v0.9.8 onwards
+//! (see <https://github.com/HakanSeven12/OpenCADStudio/issues/879>); writing
+//! and snapshot reads work on older hosts too.
+//!
+//! Host and plugin must be built by the same rustc: Rust has no stable ABI and
+//! compound types cross the dll boundary. `status` reports the compiler that
+//! built this plugin so a mismatch is one comparison away.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -49,7 +54,7 @@ use serde_json::{json, Value};
 static MANIFEST: PluginManifest = PluginManifest {
     id: "ocs.mcp_bridge",
     name: "MCP Bridge",
-    version: "0.6.0",
+    version: "0.7.0",
     description: "Read/write bridge for MCP servers and external tools.",
     api_version: ApiVersion::CURRENT,
     ribbon_order: 60,
@@ -154,6 +159,136 @@ fn entity_json(e: &EntityType) -> Option<Value> {
         _ => return None,
     };
     Some(v)
+}
+
+
+/// A block reference's placement, as a 2D transform.
+///
+/// Blocks are stored around their own base point; an `INSERT` places that
+/// content with a scale and rotation. Applying it here means clients receive
+/// ordinary world-space geometry and never have to know a block was involved.
+#[derive(Clone, Copy)]
+struct Placement {
+    base: (f64, f64),
+    offset: (f64, f64),
+    scale: (f64, f64),
+    cos_r: f64,
+    sin_r: f64,
+}
+
+impl Placement {
+    fn apply(&self, x: f64, y: f64) -> (f64, f64) {
+        let sx = (x - self.base.0) * self.scale.0;
+        let sy = (y - self.base.1) * self.scale.1;
+        (
+            self.offset.0 + sx * self.cos_r - sy * self.sin_r,
+            self.offset.1 + sx * self.sin_r + sy * self.cos_r,
+        )
+    }
+
+    /// Uniform scale factor for radii. Non-uniform scaling turns a circle into
+    /// an ellipse, which our segment model cannot express, so such blocks are
+    /// reported as skipped rather than silently distorted.
+    fn uniform_scale(&self) -> Option<f64> {
+        let (sx, sy) = self.scale;
+        if (sx.abs() - sy.abs()).abs() <= 1e-9 * sx.abs().max(1.0) {
+            Some(sx.abs())
+        } else {
+            None
+        }
+    }
+
+    fn rotation(&self) -> f64 {
+        self.sin_r.atan2(self.cos_r)
+    }
+}
+
+/// Re-emit one entity through a block placement.
+fn place_entity(e: &EntityType, p: &Placement) -> Option<Value> {
+    let mut v = entity_json(e)?;
+    let obj = v.as_object_mut()?;
+
+    let map_pt = |val: &Value| -> Option<Value> {
+        let a = val.as_array()?;
+        let (x, y) = p.apply(a.first()?.as_f64()?, a.get(1)?.as_f64()?);
+        Some(json!([x, y]))
+    };
+
+    for key in ["start", "end", "center", "position", "insert_point"] {
+        if let Some(cur) = obj.get(key) {
+            if let Some(moved) = map_pt(cur) {
+                obj.insert(key.to_string(), moved);
+            }
+        }
+    }
+    if let Some(verts) = obj.get("vertices").and_then(Value::as_array).cloned() {
+        let mut out = Vec::with_capacity(verts.len());
+        for w in &verts {
+            let a = w.as_array()?;
+            let (x, y) = p.apply(a.first()?.as_f64()?, a.get(1)?.as_f64()?);
+            // The bulge is scale- and rotation-invariant for uniform scaling.
+            out.push(json!([x, y, a.get(2).and_then(Value::as_f64).unwrap_or(0.0)]));
+        }
+        obj.insert("vertices".into(), Value::Array(out));
+    }
+    if let Some(r) = obj.get("radius").and_then(Value::as_f64) {
+        obj.insert("radius".into(), json!(r * p.uniform_scale()?));
+    }
+    for key in ["start_angle", "end_angle"] {
+        if let Some(a) = obj.get(key).and_then(Value::as_f64) {
+            obj.insert(key.to_string(), json!(a + p.rotation()));
+        }
+    }
+    obj.insert("from_block".into(), json!(true));
+    Some(v)
+}
+
+/// Expand a block reference into world-space entities.
+///
+/// Returns `None` when the block cannot be resolved or is scaled non-uniformly;
+/// the caller then reports the insert as skipped instead of guessing.
+fn expand_insert(
+    doc: &acadrust::CadDocument,
+    ins: &acadrust::entities::Insert,
+    depth: usize,
+    out: &mut Vec<Value>,
+) -> Option<usize> {
+    if depth >= 8 {
+        return None;                       // guard against cyclic definitions
+    }
+    let record = doc
+        .block_records
+        .iter()
+        .find(|br| br.name.eq_ignore_ascii_case(&ins.block_name))?;
+
+    let rot = ins.rotation;
+    let place = Placement {
+        base: (record.base_point.x, record.base_point.y),
+        offset: (ins.insert_point.x, ins.insert_point.y),
+        scale: (ins.x_scale(), ins.y_scale()),
+        cos_r: rot.cos(),
+        sin_r: rot.sin(),
+    };
+    if place.uniform_scale().is_none() {
+        return None;
+    }
+
+    let mut n = 0;
+    for h in &record.entity_handles {
+        let Some(child) = doc.get_entity(*h) else { continue };
+        match child {
+            EntityType::Insert(nested) => {
+                n += expand_insert(doc, nested, depth + 1, out).unwrap_or(0);
+            }
+            other => {
+                if let Some(v) = place_entity(other, &place) {
+                    out.push(v);
+                    n += 1;
+                }
+            }
+        }
+    }
+    Some(n)
 }
 
 // ---------------------------------------------------------------------------
@@ -271,8 +406,22 @@ fn live_selection() -> Value {
         Ok(PluginResponse::Document(doc)) => {
             let mut entities = Vec::new();
             let mut skipped = std::collections::BTreeMap::new();
+            let mut expanded = 0usize;
             for raw in &handles {
                 match doc.get_entity(acadrust::Handle::new(*raw)) {
+                    // Block references carry no geometry of their own, so a
+                    // client would see nothing usable. Expand them here, where
+                    // the block definitions are, rather than making every
+                    // caller explode blocks by hand in the GUI first.
+                    Some(EntityType::Insert(ins)) => {
+                        match expand_insert(&doc, ins, 0, &mut entities) {
+                            Some(n) => expanded += n,
+                            None => {
+                                *skipped.entry("Insert (unresolved or non-uniform scale)".into())
+                                    .or_insert(0usize) += 1;
+                            }
+                        }
+                    }
                     Some(e) => match entity_json(e) {
                         Some(v) => entities.push(v),
                         None => *skipped
@@ -285,7 +434,11 @@ fn live_selection() -> Value {
             json!({
                 "ok": true, "source": "snapshot (click-free)",
                 "selected": handles.len(), "delivered": entities.len(),
+                "from_blocks": expanded,
                 "tab_id": SELECTION_TAB.lock().ok().and_then(|g| *g),
+                // Straight from the live document, so callers no longer have
+                // to guess or read the units out of a file on disk.
+                "insertion_units": doc.header.insertion_units,
                 "skipped_by_type": skipped,
                 "unit": "drawing units", "angles": "radians",
                 "notifications_selection": notif,

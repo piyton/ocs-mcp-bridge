@@ -37,7 +37,7 @@ requests per connection, one JSON object in, one out:
 | request | reply |
 |---|---|
 | `{"op":"status"}` | `{"ok":true,"connected":true,"selected":40,...}` |
-| `{"op":"selection"}` | handles + full geometry of the current selection |
+| `{"op":"selection"}` | handles + full geometry, block references expanded, plus `insertion_units` from the live document |
 | `{"op":"add","entities":[...],"undo_label":"..."}` | draws entities, returns their handles |
 | `{"op":"remove","handles":[...],"undo_label":"..."}` | deletes entities |
 | `{"op":"info","msg":"..."}` | prints on the command line |

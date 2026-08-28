@@ -54,7 +54,7 @@ use serde_json::{json, Value};
 static MANIFEST: PluginManifest = PluginManifest {
     id: "ocs.mcp_bridge",
     name: "MCP Bridge",
-    version: "0.7.0",
+    version: "0.8.0",
     description: "Read/write bridge for MCP servers and external tools.",
     api_version: ApiVersion::CURRENT,
     ribbon_order: 60,
@@ -81,6 +81,153 @@ static SENDER: Mutex<Option<Arc<dyn PluginRequestSender>>> = Mutex::new(None);
 static NOTIF_TOTAL: AtomicUsize = AtomicUsize::new(0);
 static NOTIF_SELECTION: AtomicUsize = AtomicUsize::new(0);
 static SERVER: OnceLock<()> = OnceLock::new();
+
+
+/// Where to report problems. Also printed, so a headless or locked-down
+/// machine still gets a usable link.
+const ISSUES_URL: &str = "https://github.com/piyton/ocs-mcp-bridge/issues";
+
+/// The changelog travels inside the binary, so About always describes the
+/// build you are actually running rather than whatever is on disk.
+const CHANGELOG: &str = include_str!("../CHANGELOG.md");
+
+/// The newest changelog section, without its heading.
+///
+/// Entries are `## <version>` followed by bullets; take the first one and stop
+/// at the next heading. Returns an empty slice if the file is not shaped that
+/// way, so a malformed changelog costs a blank panel rather than a panic.
+fn latest_changes() -> Vec<&'static str> {
+    let mut lines = CHANGELOG.lines().skip_while(|l| !l.starts_with("## "));
+    lines.next();
+    lines
+        .take_while(|l| !l.starts_with("## "))
+        .map(str::trim_end)
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// Ask the desktop to open a URL. Best-effort: the caller prints the link too.
+fn open_url(url: &str) {
+    #[cfg(target_os = "windows")]
+    let cmd = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    #[cfg(target_os = "macos")]
+    let cmd = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let cmd = std::process::Command::new("xdg-open").arg(url).spawn();
+    let _ = cmd;
+}
+
+
+/// The About panel, as a page.
+///
+/// The plugin API has no dialog: `ModuleEvent` offers commands and file
+/// pickers, and `HostApi` only writes lines to the command line - which shows
+/// two at a time and scrolls away. Writing a page and handing it to the
+/// browser is the only way to show this much text legibly, and it keeps the
+/// content tied to the running build rather than a file on disk.
+const ABOUT_TEMPLATE: &str = r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>MCP Bridge __VERSION__</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --ink: #14181d; --dim: #5b6672; --line: #d8dee6;
+    --bg: #f7f9fb; --card: #ffffff; --accent: #1f6feb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink: #e6edf3; --dim: #93a1b0; --line: #2b333c;
+            --bg: #0f1419; --card: #161b22; --accent: #58a6ff; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 2.5rem 1.5rem; background: var(--bg); color: var(--ink);
+         font: 15px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 46rem; margin: 0 auto; }
+  h1 { font-size: 1.5rem; margin: 0 0 .2rem; letter-spacing: -.01em; }
+  .sub { color: var(--dim); margin: 0 0 2rem; }
+  .card { background: var(--card); border: 1px solid var(--line);
+          border-radius: 10px; padding: 1.25rem 1.4rem; margin-bottom: 1.25rem; }
+  h2 { font-size: .78rem; text-transform: uppercase; letter-spacing: .09em;
+       color: var(--dim); margin: 0 0 .9rem; font-weight: 600; }
+  dl { display: grid; grid-template-columns: 9.5rem 1fr; gap: .5rem 1rem; margin: 0; }
+  dt { color: var(--dim); }
+  dd { margin: 0; font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+       font-size: .88rem; word-break: break-all; }
+  ul { margin: 0; padding-left: 1.1rem; }
+  li { margin-bottom: .45rem; }
+  a { color: var(--accent); }
+  footer { color: var(--dim); font-size: .85rem; margin-top: 2rem; }
+</style></head><body><main>
+  <h1>MCP Bridge __VERSION__</h1>
+  <p class="sub">Reads the live selection and draws into the open drawing,
+     for tools outside Open CAD Studio.</p>
+
+  <div class="card">
+    <h2>New in this version</h2>
+    <ul>__CHANGES__</ul>
+  </div>
+
+  <div class="card">
+    <h2>This build</h2>
+    <dl>
+      <dt>Bridge address</dt><dd>127.0.0.1:__PORT__</dd>
+      <dt>Write channel</dt><dd>__CONNECTED__</dd>
+      <dt>Selection</dt><dd>__SELECTED__ entities</dd>
+      <dt>Built by</dt><dd>rustc __RUSTC__</dd>
+    </dl>
+    <p style="color:var(--dim);font-size:.85rem;margin:.9rem 0 0">
+      Host and plugin must be built by the same rustc. If reading a selection
+      makes the bridge disappear while status still works, that is the cause.</p>
+  </div>
+
+  <div class="card">
+    <h2>Links</h2>
+    <ul>
+      <li><a href="__REPO__">Source and documentation</a></li>
+      <li><a href="__REPO__/blob/main/GETTING-STARTED.md">Getting started</a></li>
+      <li><a href="__ISSUES__">Report a problem or request a feature</a></li>
+    </ul>
+  </div>
+
+  <footer>GPL-3.0-only, like the host it links against.</footer>
+</main></body></html>"#;
+
+/// Render the About page and return where it was written.
+fn about_html() -> Option<std::path::PathBuf> {
+    let changes: String = latest_changes()
+        .iter()
+        .map(|l| {
+            let text = l.trim_start_matches(['-', ' ']);
+            format!("<li>{}</li>", html_escape(text))
+        })
+        .collect();
+    let port = std::env::var("OCS_BRIDGE_PORT").unwrap_or_else(|_| "48810".into());
+    let connected = SENDER.lock().map(|g| g.is_some()).unwrap_or(false);
+    let selected = LAST_SELECTION.lock().map(|g| g.len()).unwrap_or(0);
+    let repo = ISSUES_URL.trim_end_matches("/issues");
+
+    let page = ABOUT_TEMPLATE
+        .replace("__VERSION__", MANIFEST.version)
+        .replace("__CHANGES__", &changes)
+        .replace("__PORT__", &port)
+        .replace(
+            "__CONNECTED__",
+            if connected { "connected" } else { "not connected - run any command" },
+        )
+        .replace("__SELECTED__", &selected.to_string())
+        .replace("__RUSTC__", env!("BRIDGE_RUSTC"))
+        .replace("__ISSUES__", ISSUES_URL)
+        .replace("__REPO__", repo);
+
+    let path = std::env::temp_dir().join("ocs_mcp_bridge_about.html");
+    std::fs::write(&path, page).ok()?;
+    Some(path)
+}
+
+/// Minimal escaping: the changelog is ours, but it must not be able to break
+/// the page if someone writes an ampersand or angle bracket in it.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
 
 // ---------------------------------------------------------------------------
 // geometry: EntityType -> JSON (reading)
@@ -568,6 +715,8 @@ fn handle_request(line: &str) -> Value {
             // stable ABI and compound types cross the dll boundary. Compare
             // this against the `rustc/<hash>` string inside the host binary.
             "rustc": env!("BRIDGE_RUSTC"),
+            "changes": latest_changes(),
+            "issues": ISSUES_URL,
         }),
         "selection" => live_selection(),
         "add" => live_add(&req),
@@ -670,6 +819,18 @@ impl CadModule for BridgeModule {
                         icon: IconKind::Glyph("#"),
                         event: ModuleEvent::Command("MCP_CONNECT".to_string()),
                     }),
+                    RibbonItem::LargeTool(ToolDef {
+                        id: "MCP_ABOUT",
+                        label: "About",
+                        icon: IconKind::Glyph("?"),
+                        event: ModuleEvent::Command("MCP_ABOUT".to_string()),
+                    }),
+                    RibbonItem::LargeTool(ToolDef {
+                        id: "MCP_FEEDBACK",
+                        label: "Feedback",
+                        icon: IconKind::Glyph("!"),
+                        event: ModuleEvent::Command("MCP_FEEDBACK".to_string()),
+                    }),
                 ],
             }]
         })
@@ -695,6 +856,37 @@ impl BuiltinPlugin for BridgePlugin {
         cache_sender(host);
 
         match cmd {
+            "MCP_ABOUT" => {
+                // The command line shows two lines at a time, so the panel
+                // goes to the browser and only a pointer stays here.
+                match about_html() {
+                    Some(p) => {
+                        open_url(&format!("file:///{}", p.display().to_string()
+                            .replace('\\', "/")));
+                        host.push_info(&format!(
+                            "MCP Bridge {} - opened About in your browser.",
+                            MANIFEST.version));
+                        host.push_info(&format!("  {}", p.display()));
+                    }
+                    None => {
+                        host.push_info(&format!("MCP Bridge {}", MANIFEST.version));
+                        host.push_info(&format!("  rustc {}", env!("BRIDGE_RUSTC")));
+                        host.push_error("Could not write the About page to the temp folder.");
+                    }
+                }
+                true
+            }
+            "MCP_FEEDBACK" => {
+                open_url(ISSUES_URL);
+                host.push_info("MCP Bridge: opening the issue tracker in your browser.");
+                host.push_info(&format!("  {ISSUES_URL}"));
+                host.push_info(&format!(
+                    "  Please mention version {} and rustc {}.",
+                    MANIFEST.version,
+                    env!("BRIDGE_RUSTC")
+                ));
+                true
+            }
             "MCP_STATUS" => {
                 start_server();
                 let port = std::env::var("OCS_BRIDGE_PORT")

@@ -1,14 +1,18 @@
 [plugin]
 id = "ocs.mcp_bridge"
 name = "MCP Bridge"
-version = "0.8.0"
+version = "0.9.0"
 description = "Serves the live selection and accepts draw/remove requests over a local socket, so MCP servers and other tools can read and write the open drawing."
 author = "piyton"
 license = "GPL-3.0-only"
 repository = "piyton/ocs-mcp-bridge"
 
 [opencad]
-api_version = 4
+api_version = 5
 ribbon_order = 60
 command_prefixes = ["MCP_"]
 xdata_apps = []
+# Required from API v5: the host refuses a plugin that does not declare
+# the toolchain it was built with, because Rust has no stable ABI.
+# Stamped by the release workflow so it cannot drift from the binary.
+rustc_version = "rustc 1.98.0 (88d9e12ae 2026-08-18)"

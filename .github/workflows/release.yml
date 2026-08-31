@@ -32,6 +32,16 @@ jobs:
       - name: Rename to the Plugin Manager asset name
         shell: bash
         run: cp "target/release/${{ matrix.lib }}" "${{ matrix.asset }}"
+      # From API v5 the host refuses a plugin that does not declare the
+      # toolchain it was built with. Stamp it from the compiler that actually
+      # ran, so the manifest cannot drift from the binary.
+      - name: Stamp rustc_version into plugin.toml
+        shell: bash
+        run: |
+          RUSTC="$(rustc --version)"
+          sed -i.bak "s|^rustc_version = .*|rustc_version = \"$RUSTC\"|" plugin.toml
+          rm -f plugin.toml.bak
+          grep rustc_version plugin.toml
       - uses: softprops/action-gh-release@v2
         with:
           files: |

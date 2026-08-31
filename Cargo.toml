@@ -1,6 +1,6 @@
 [package]
 name = "ocs-mcp-bridge"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 description = "Open CAD Studio plugin that serves the live selection and accepts draw/remove requests over a local socket, so MCP servers and other tools can read and write the open drawing."
 license = "GPL-3.0-only"
@@ -12,8 +12,9 @@ crate-type = ["cdylib"]
 # Pin to the release tag the installed host was built from, so the loaded
 # library is binary-compatible with it.
 [dependencies]
-ocs_plugin_api = { git = "https://github.com/HakanSeven12/OpenCADStudio", tag = "v0.9.8", features = ["host"] }
-acadrust = { git = "https://github.com/HakanSeven12/cadcodec.git", rev = "788eea0161ba9f3eb7ee6569fd8bb52a8207a2ed", features = ["serde"] }
+# API v5 has no release yet, so this tracks main until v0.9.9 ships.
+ocs_plugin_api = { git = "https://github.com/HakanSeven12/OpenCADStudio", branch = "main", features = ["host"] }
+acadrust = { git = "https://github.com/HakanSeven12/cadcodec.git", rev = "45789a7700bd5c006feb4c7ff16c2ff80a7047db", features = ["serde"] }
 serde_json = "1"
 
 # `ocs_plugin_api` asks for acadrust rev 5b2ae66 while the host workspace pins
@@ -21,4 +22,4 @@ serde_json = "1"
 # cargo builds both revisions, and the two sets of `EntityType` / `Handle`
 # types do not interchange - which is a wall of E0308 mismatches.
 [patch."https://github.com/HakanSeven12/cadcodec.git"]
-acadrust = { git = "https://git@github.com/HakanSeven12/cadcodec.git", rev = "788eea0161ba9f3eb7ee6569fd8bb52a8207a2ed" }
+acadrust = { git = "https://git@github.com/HakanSeven12/cadcodec.git", rev = "45789a7700bd5c006feb4c7ff16c2ff80a7047db" }

@@ -54,7 +54,7 @@ use serde_json::{json, Value};
 static MANIFEST: PluginManifest = PluginManifest {
     id: "ocs.mcp_bridge",
     name: "MCP Bridge",
-    version: "0.8.0",
+    version: "0.9.0",
     description: "Read/write bridge for MCP servers and external tools.",
     api_version: ApiVersion::CURRENT,
     ribbon_order: 60,
@@ -67,6 +67,12 @@ static LAST_SELECTION: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 /// Tab the selection belongs to. `None` on hosts that send the tab-less
 /// notification, which is why clients must treat it as optional.
 static SELECTION_TAB: Mutex<Option<u64>> = Mutex::new(None);
+/// Path of the active document, refreshed whenever the host calls in.
+///
+/// `HostApi::document_path` is only reachable during a dispatch or `on_load`,
+/// so this is a cache rather than a live read: it can lag if the user switches
+/// tabs without running a command. Clients get it as a best-effort hint.
+static DOCUMENT_PATH: Mutex<Option<String>> = Mutex::new(None);
 /// Geometry captured via the Connect button (fallback without a sender).
 static SELECTION_JSON: Mutex<Option<String>> = Mutex::new(None);
 /// Thread-safe write channel to the host, cached on the first dispatch.
@@ -517,6 +523,14 @@ fn entity_from_json(v: &Value) -> Result<EntityType, String> {
 /// command through every loaded plugin (see `try_dispatch`), so the first
 /// command the user runs - ours or not - is enough to connect. That makes the
 /// Connect button a fallback rather than a requirement.
+/// Remember which file the active tab holds. Added in API v5.
+fn cache_document_path(host: &dyn HostApi) {
+    let path = host.document_path(host.tab_id()).map(|p| p.display().to_string());
+    if let Ok(mut g) = DOCUMENT_PATH.lock() {
+        *g = path;
+    }
+}
+
 fn cache_sender(host: &mut dyn HostApi) -> bool {
     if let Ok(g) = SENDER.lock() {
         if g.is_some() {
@@ -586,6 +600,7 @@ fn live_selection() -> Value {
                 // Straight from the live document, so callers no longer have
                 // to guess or read the units out of a file on disk.
                 "insertion_units": doc.header.insertion_units,
+                "document_path": DOCUMENT_PATH.lock().ok().and_then(|g| g.clone()),
                 "skipped_by_type": skipped,
                 "unit": "drawing units", "angles": "radians",
                 "notifications_selection": notif,
@@ -715,6 +730,7 @@ fn handle_request(line: &str) -> Value {
             // stable ABI and compound types cross the dll boundary. Compare
             // this against the `rustc/<hash>` string inside the host binary.
             "rustc": env!("BRIDGE_RUSTC"),
+            "document_path": DOCUMENT_PATH.lock().ok().and_then(|g| g.clone()),
             "changes": latest_changes(),
             "issues": ISSUES_URL,
         }),
@@ -854,6 +870,7 @@ impl BuiltinPlugin for BridgePlugin {
         // Every command the user runs passes through here, ours or not, so the
         // first one connects the bridge without anyone clicking anything.
         cache_sender(host);
+        cache_document_path(host);
 
         match cmd {
             "MCP_ABOUT" => {
@@ -965,6 +982,17 @@ impl BuiltinPlugin for BridgePlugin {
 
     // HostNotification is #[non_exhaustive]; `if let` keeps this compiling
     // when future host versions add variants.
+    /// Set up before any user command runs (API v5).
+    ///
+    /// Until v5 a plugin could only reach `HostApi` from a dispatch, so a
+    /// bridge with a worker thread had to wait for the user to happen to run
+    /// something. This removes that dependency entirely.
+    fn on_load(&mut self, host: &mut dyn HostApi) {
+        start_server();
+        cache_sender(host);
+        cache_document_path(host);
+    }
+
     fn on_notification(&mut self, _command_id: Option<u64>, notification: HostNotification) {
         NOTIF_TOTAL.fetch_add(1, Ordering::Relaxed);
 
